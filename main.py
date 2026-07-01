@@ -68,36 +68,54 @@ decomposed questions: ["How to find authors of a scientific paper"
 """
 
 # Multi-querry 
-def get_unique_union(documents):
-    """ Unique union of retrieved docs """
-    # Flatten list of lists, and convert each Document to string
-    flattened_docs = [dumps(doc) for sublist in documents for doc in sublist]
-    # Get unique documents
-    unique_docs = list(set(flattened_docs))
-    # Return
-    return [loads(doc) for doc in unique_docs]
-
 template = """You are an AI language model assistant. Your task is to generate five 
 different versions of the given user question to retrieve relevant documents from a vector 
 database. By generating multiple perspectives on the user question, your goal is to help
 the user overcome some of the limitations of the distance-based similarity search. 
 Provide these alternative questions separated by newlines. Original question: {question}"""
 prompt_multiple_querries = ChatPromptTemplate.from_template(template)
+def reciprocal_rank_fusion(results: list[list], k=60):
+    """ Reciprocal_rank_fusion that takes multiple lists of ranked documents 
+        and an optional parameter k used in the RRF formula """
+    
+    # Initialize a dictionary to hold fused scores for each unique document
+    fused_scores = {}
+
+    # Iterate through each list of ranked documents
+    for docs in results:
+        # Iterate through each document in the list, with its rank (position in the list)
+        for rank, doc in enumerate(docs):
+            # Convert the document to a string format to use as a key (assumes documents can be serialized to JSON)
+            doc_str = dumps(doc)
+            # If the document is not yet in the fused_scores dictionary, add it with an initial score of 0
+            if doc_str not in fused_scores:
+                fused_scores[doc_str] = 0
+            # Retrieve the current score of the document, if any
+            previous_score = fused_scores[doc_str]
+            # Update the score of the document using the RRF formula: 1 / (rank + k)
+            fused_scores[doc_str] += 1 / (rank + k)
+
+    # Sort the documents based on their fused scores in descending order to get the final reranked results
+    reranked_results = [
+        (loads(doc), score)
+        for doc, score in sorted(fused_scores.items(), key=lambda x: x[1], reverse=True)
+    ]
+
+    # Return the reranked results as a list of tuples, each containing the document and its fused score
+    return reranked_results
 multi_querries_questions = {}
+
 generate_multi_querries = (
     {"question": RunnablePassthrough()}
     | prompt_multiple_querries
     | gemini
     | StrOutputParser()
 )
+
+
 for idx, ques in enumerate(decomposed_questions):
     multi_querries_questions[idx] = generate_multi_querries.invoke(ques)
-retrieved_docs = {}
 
-for idx, queries in multi_querries_questions.items():
-    docs = retriver.map().invoke(queries)
-    retrieved_docs[idx] = get_unique_union(docs)
-    
 """
 print(f"Multi querries; {multi_querries_questions}")
 Multi querries; {
@@ -106,12 +124,63 @@ Multi querries; {
     2: ['List of academic databases for scientific publications', 'How to find authors using scientific publication databases', 'Best databases for tracking scientific authors and their publications']}
 """
 
+retrieved_docs = {}
 # Fusion based on multi-queries context
+for idx, queries in multi_querries_questions.items():
+    query_list = [q.strip() for q in queries.split("\n") if q.strip()]
+    docs = retriver.map().invoke(query_list)
+    fused = reciprocal_rank_fusion(docs)
+    retrieved_docs[idx] = fused[:2] # Take top 2 relevant documents
 
+# Decomposed questions's answer based on multi queries context
+template = """Return string only, no other text. The answer to the question is located in the vector store because
+this a a rag pipeline.
+Example output: answer.
+Answer the question based only on the following context:
+{context}
 
-# Decomposed questions answer based on multi queries context
-
+Question: {question}
+"""
+decomposed_questions_answer = []
+decomposed_questions_prompt = ChatPromptTemplate.from_template(template)
+for idx, question in enumerate(decomposed_questions):
+    decomposed_questions_rag_chain = (
+        {
+            "context": retrieved_docs[idx],
+            "question": RunnablePassthrough()
+        }
+        | decomposed_questions_prompt
+        | gemini
+        | StrOutputParser()
+    )
+    answer = decomposed_questions_rag_chain.invoke(question)  
+    decomposed_questions_answer.append(answer) 
 
 # Format q&a pairs (decomposed questions) and final answer
+def format_qa(questions, answers):
+    formatted_string = ""
+    for i, (question, answer) in enumerate(zip(questions, answers), start=1):
+        formatted_string += f"Question {i}: {question}\nAnswer {i}: {answer}\n\n"
+    return formatted_string.strip()
+final_context = format_qa(decomposed_questions, decomposed_questions_answer)
 
+# Final answer
+template = """Here is a set of Q+A pairs:
+
+{context}
+
+Use these to synthesize an answer to the question: {question}
+"""
+final_prompt = ChatPromptTemplate.from_template(template)
+final_rag_chain = (
+    {
+        "context": final_context,
+        "question" : RunnablePassthrough()
+    }
+    | final_prompt
+    | gemini
+    | StrOutputParser()
+)
+final_response = final_rag_chain.invoke(question)
+print(f"Final response: {final_response}")
 
