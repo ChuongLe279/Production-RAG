@@ -12,7 +12,7 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_community.document_loaders import PyPDFLoader
-from langchain.load import dumps, loads 
+from langchain_core.load import dumps, loads
 from langchain_core.output_parsers import JsonOutputParser
 # LLM
 gemini = ChatGoogleGenerativeAI(
@@ -141,20 +141,18 @@ Answer the question based only on the following context:
 
 Question: {question}
 """
+def format_docs(doc_score_pairs):
+    return "\n\n".join(doc.page_content for doc, score in doc_score_pairs)
+
 decomposed_questions_answer = []
 decomposed_questions_prompt = ChatPromptTemplate.from_template(template)
-for idx, question in enumerate(decomposed_questions):
-    decomposed_questions_rag_chain = (
-        {
-            "context": retrieved_docs[idx],
-            "question": RunnablePassthrough()
-        }
-        | decomposed_questions_prompt
-        | gemini
-        | StrOutputParser()
-    )
-    answer = decomposed_questions_rag_chain.invoke(question)  
-    decomposed_questions_answer.append(answer) 
+for idx, sub_question in enumerate(decomposed_questions):
+    decomposed_questions_rag_chain = decomposed_questions_prompt | gemini | StrOutputParser()
+    answer = decomposed_questions_rag_chain.invoke({
+        "context": format_docs(retrieved_docs[idx]),
+        "question": sub_question
+    })
+    decomposed_questions_answer.append(answer)
 
 # Format q&a pairs (decomposed questions) and final answer
 def format_qa(questions, answers):
@@ -172,15 +170,12 @@ template = """Here is a set of Q+A pairs:
 Use these to synthesize an answer to the question: {question}
 """
 final_prompt = ChatPromptTemplate.from_template(template)
-final_rag_chain = (
-    {
-        "context": final_context,
-        "question" : RunnablePassthrough()
-    }
-    | final_prompt
-    | gemini
-    | StrOutputParser()
-)
-final_response = final_rag_chain.invoke(question)
+final_rag_chain = final_prompt | gemini | StrOutputParser()
+
+final_response = final_rag_chain.invoke({
+    "context": final_context,
+    "question": question   # now correctly the original master question
+})
+
 print(f"Final response: {final_response}")
 
